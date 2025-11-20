@@ -2,10 +2,12 @@ using System;
 using System.IO;
 using System.Collections.Generic;
 using System.Text;
+using UnityEditor;
+using UnityEngine.AddressableAssets.ResourceLocators;
 
 public static class CatalogScanner
 {
-    public class CatalogCheckResult
+    private class CatalogCheckResult
     {
         public string FilePath;
         public bool IsValid;
@@ -15,21 +17,35 @@ public static class CatalogScanner
         public int HeaderSize;
         public int EntryCount;
         public int ProviderCount;
-
+        public int BundleCount;
         public bool PossiblyTruncated;
         public bool PossiblyShifted;
         public bool PossiblyVersionMismatch;
 
-        public string StructureSummary;
-        public string BackupPath;
-
         public string FileName => Path.GetFileName(FilePath);
+    }
+
+
+
+    [MenuItem("Tools/Custom/CatalogScanner")]
+    public static void Run()
+    {
+        var path = EditorUtility.OpenFolderPanel("Please select catalog binary files path", "", "");
+        if (string.isNullOrEmpty(path))
+        {
+            return;
+        }
+
+        var result = ScanDirectory(path, true);
+        var now = DateTime.Now;
+        var timeSuffixStr = $"_{now.Year:0000}-{now.Month:00}-{now.Day:00}-{now.Hour:00}-{now.Minute:00}";
+        GenerateHtmlReport(result, $"CatalogScanner_{timeSuffixStr}.html");
     }
 
     // =========================================================
     // 单文件检查
     // =========================================================
-    public static CatalogCheckResult CheckCatalog(string path, bool autoRemoveCorrupt = false)
+    private static CatalogCheckResult CheckCatalog(string path, bool autoRemoveCorrupt = false)
     {
         var result = new CatalogCheckResult { FilePath = path };
 
@@ -63,8 +79,6 @@ public static class CatalogScanner
                     "Header block exceeds file length (truncated or overwritten).",
                     truncated:true);
 
-            ms.Seek(result.HeaderSize, SeekOrigin.Begin);
-
             // -------- ENTRIES --------
             if (ms.Position + 4 > ms.Length)
                 return Fail(result, path, autoRemoveCorrupt, 
@@ -84,12 +98,6 @@ public static class CatalogScanner
             result.ProviderCount = br.ReadInt32();
             bool providerSuspicious = result.ProviderCount < 0 || result.ProviderCount > 10_000_000;
 
-            // Validate provider block
-            long providerBlockEnd = ms.Position + result.ProviderCount * 4L;
-            if (providerBlockEnd > ms.Length)
-                return Fail(result, path, autoRemoveCorrupt,
-                    "Provider block extends past file end (corrupted or partially overwritten).",
-                    truncated:true);
 
             // -------- Version Mismatch --------
             if (DetectVersionMismatch(bytes, result.HeaderSize))
@@ -99,17 +107,14 @@ public static class CatalogScanner
             if (DetectShifted(bytes, result.HeaderSize, result.EntryCount, result.ProviderCount))
                 result.PossiblyShifted = true;
 
-            result.StructureSummary =
-$@"FileSize: {result.FileLength:N0} bytes
-HeaderSize: {result.HeaderSize:N0}
-Entries: {result.EntryCount:N0} {(entrySuspicious ? "(Suspicious)" : "")}
-Providers: {result.ProviderCount:N0} {(providerSuspicious ? "(Suspicious)" : "")}
-VersionMismatch: {result.PossiblyVersionMismatch}
-ShiftedStructure: {result.PossiblyShifted}
-";
-
             result.IsValid = true;
             result.Reason = "Catalog appears structurally valid.";
+
+            var ccd = ContentCatalogData.LoadFromFile(path);
+            var locator = ccd.CreateLocator();
+            var keys = ((ContentCatalogData.ResourceLocator)locator).BundleKeyArray;
+            result.BundleCount = keys.Length;
+
             return result;
         }
         catch (Exception e)
@@ -156,7 +161,6 @@ ShiftedStructure: {result.PossiblyShifted}
             string backup = path + ".corrupt.bak";
             if (File.Exists(backup)) File.Delete(backup);
             File.Move(path, backup);
-            result.BackupPath = backup;
         }
 
         return result;
@@ -165,7 +169,7 @@ ShiftedStructure: {result.PossiblyShifted}
     // =========================================================
     // 批量扫描目录
     // =========================================================
-    public static List<CatalogCheckResult> ScanDirectory(string root, bool autoRemoveCorrupt = false)
+    private static List<CatalogCheckResult> ScanDirectory(string root, bool autoRemoveCorrupt = false)
     {
         var results = new List<CatalogCheckResult>();
         if (!Directory.Exists(root)) return results;
@@ -183,7 +187,7 @@ ShiftedStructure: {result.PossiblyShifted}
     // =========================================================
     // 生成 HTML 报告
     // =========================================================
-    public static void GenerateHtmlReport(List<CatalogCheckResult> results, string outputPath)
+    private static void GenerateHtmlReport(List<CatalogCheckResult> results, string outputPath)
     {
         var sb = new StringBuilder();
         sb.AppendLine("<!DOCTYPE html>");
@@ -192,7 +196,7 @@ ShiftedStructure: {result.PossiblyShifted}
         sb.AppendLine("</head><body>");
         sb.AppendLine($"<h2>Catalog Scan Report - {DateTime.Now}</h2>");
         sb.AppendLine("<table>");
-        sb.AppendLine("<tr><th>File</th><th>Status</th><th>Reason</th><th>Header</th><th>Entries</th><th>Providers</th><th>VersionMismatch</th><th>Shifted</th></tr>");
+        sb.AppendLine("<tr><th>File</th><th>Status</th><th>Reason</th><th>Header</th><th>Entries</th><th>Providers</th><th>BundleCount</th><th>Truncated</th><th>VersionMismatch</th><th>Shifted</th></tr>");
 
         foreach (var r in results)
         {
@@ -204,6 +208,8 @@ ShiftedStructure: {result.PossiblyShifted}
             sb.AppendLine($"<td>{r.HeaderSize}</td>");
             sb.AppendLine($"<td>{r.EntryCount}</td>");
             sb.AppendLine($"<td>{r.ProviderCount}</td>");
+            sb.AppendLine($"<td>{r.BundleCount}</td>");
+            sb.AppendLine($"<td>{r.PossiblyTruncated}</td>");
             sb.AppendLine($"<td>{r.PossiblyVersionMismatch}</td>");
             sb.AppendLine($"<td>{r.PossiblyShifted}</td>");
             sb.AppendLine("</tr>");
